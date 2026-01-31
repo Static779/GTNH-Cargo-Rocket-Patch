@@ -1,0 +1,17 @@
+[
+  {
+    "modid": "gtnhrocketanim",
+    "name": "GTNH Rocket Landing/Takeoff Animation",
+    "description": "Coremod patch for GTNH Galacticraft fork: configurable spawn height on arrival + smooth landing/takeoff easing. Makes cargo rockets descend realistically instead of teleporting directly to pads.",
+    "version": "${version}",
+    "mcversion": "${mcversion}",
+    "authorList": ["GTNH Community"],
+    "credits": "Based on Galacticraft by Micdoodle8",
+    "url": "",
+    "updateUrl": "",
+    "dependencies": ["Galacticraft"],
+    "parent": "",
+    "logoFile": "",
+    "screenshots": []
+  }
+]
