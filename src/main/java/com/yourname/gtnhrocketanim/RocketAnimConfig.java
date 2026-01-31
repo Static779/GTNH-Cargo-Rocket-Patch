@@ -62,7 +62,7 @@ public final class RocketAnimConfig {
     // ========== DEBUG CONFIG ==========
     
     /** Enable debug logging to console. */
-    public static boolean debugLogging = true;  // Default true for testing
+    public static boolean debugLogging = false;  // Default false for production
 
     private RocketAnimConfig() {}
 
