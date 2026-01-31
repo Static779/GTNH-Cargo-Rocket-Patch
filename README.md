@@ -2,6 +2,8 @@
 
 A Forge coremod for **GT New Horizons** (Minecraft 1.7.10) that adds smooth, cinematic landing and takeoff animations to Galacticraft cargo rockets.
 
+![Rocket Landing Demo](gif.gif)
+
 ## 🚀 Features
 
 ### Takeoff Animation
