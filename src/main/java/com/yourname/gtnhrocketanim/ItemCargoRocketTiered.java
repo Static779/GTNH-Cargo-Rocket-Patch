@@ -1,12 +1,16 @@
 package com.yourname.gtnhrocketanim;
 
 import cpw.mods.fml.common.registry.GameRegistry;
+import cpw.mods.fml.relauncher.Side;
+import cpw.mods.fml.relauncher.SideOnly;
 import net.minecraft.block.Block;
+import net.minecraft.client.renderer.texture.IIconRegister;
 import net.minecraft.creativetab.CreativeTabs;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
+import net.minecraft.util.IIcon;
 import net.minecraft.world.World;
 import net.minecraftforge.fluids.Fluid;
 import net.minecraftforge.fluids.FluidRegistry;
@@ -37,6 +41,10 @@ import java.util.List;
  * cache so our ASM hooks apply the correct tier behaviour immediately.
  */
 public class ItemCargoRocketTiered extends Item {
+
+    /** Per-damage-value inventory icons (client-side only). */
+    @SideOnly(Side.CLIENT)
+    private IIcon[] tierIcons;
 
     /** CargoRocketTier for each damage value. */
     public static final CargoRocketTier[] DAMAGE_TO_TIER = {
@@ -86,6 +94,29 @@ public class ItemCargoRocketTiered extends Item {
         for (int i = 0; i < DAMAGE_TO_TIER.length; i++) {
             list.add(new ItemStack(item, 1, i));
         }
+    }
+
+    // -----------------------------------------------------------------------
+    //  Client-side icon registration
+    // -----------------------------------------------------------------------
+
+    @Override
+    @SideOnly(Side.CLIENT)
+    public void registerIcons(IIconRegister register) {
+        tierIcons = new IIcon[DAMAGE_TO_TIER.length];
+        for (int i = 0; i < DAMAGE_TO_TIER.length; i++) {
+            // Icon name matches the PNG file in assets/gtnhrocketanim/textures/items/
+            // e.g. "gtnhrocketanim:t3cargorocket" → textures/items/t3cargorocket.png
+            String iconName = DAMAGE_TO_TIER[i].name().toLowerCase() + "cargorocket";
+            tierIcons[i] = register.registerIcon("gtnhrocketanim:" + iconName);
+        }
+    }
+
+    @Override
+    @SideOnly(Side.CLIENT)
+    public IIcon getIconFromDamage(int damage) {
+        if (tierIcons == null) return null;
+        return tierIcons[clampDmg(damage)];
     }
 
     // -----------------------------------------------------------------------

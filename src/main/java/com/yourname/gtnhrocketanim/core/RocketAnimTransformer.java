@@ -459,16 +459,22 @@ public class RocketAnimTransformer implements IClassTransformer {
     //  RenderCargoRocket patch implementations
     // ==========================================================================
 
+    private static final String RESOURCE_LOCATION_DESC = "Lnet/minecraft/util/ResourceLocation;";
+
     /**
-     * (9) In renderBuggy, replace every GETSTATIC of "cargoRocketTexture" with a call
-     * to hookGetCargoRocketTexture(entity), where entity is at the given slot.
+     * (9) In renderBuggy, replace every GETSTATIC that pushes a ResourceLocation
+     * with a call to hookGetCargoRocketTexture(entity).
+     *
+     * We intentionally match ANY static ResourceLocation field (not just the
+     * well-known "cargoRocketTexture") so that GTNH fork variants with different
+     * field names are also caught.  The entity argument is at the given local slot.
      */
     private void patchRenderTexture(MethodNode mn, int entitySlot) {
         int replaced = 0;
         for (AbstractInsnNode node : mn.instructions.toArray()) {
             if (node.getOpcode() == Opcodes.GETSTATIC) {
                 FieldInsnNode fin = (FieldInsnNode) node;
-                if ("cargoRocketTexture".equals(fin.name)) {
+                if (RESOURCE_LOCATION_DESC.equals(fin.desc)) {
                     InsnList replacement = new InsnList();
                     replacement.add(new VarInsnNode(Opcodes.ALOAD, entitySlot));
                     replacement.add(new MethodInsnNode(Opcodes.INVOKESTATIC, HOOKS,
@@ -477,10 +483,16 @@ public class RocketAnimTransformer implements IClassTransformer {
                     mn.instructions.insertBefore(node, replacement);
                     mn.instructions.remove(node);
                     replaced++;
+                    System.out.println("[GTNH Rocket Anim] renderBuggy: replaced GETSTATIC " + fin.owner + "." + fin.name);
                 }
             }
         }
-        System.out.println("[GTNH Rocket Anim] renderBuggy: replaced " + replaced + " cargoRocketTexture access(es)");
+        if (replaced == 0) {
+            System.out.println("[GTNH Rocket Anim] renderBuggy: no static ResourceLocation field found " +
+                               "(GC may use bindEntityTexture — func_110779_a patch handles it)");
+        } else {
+            System.out.println("[GTNH Rocket Anim] renderBuggy: replaced " + replaced + " ResourceLocation GETSTATIC(s)");
+        }
     }
 
     /**

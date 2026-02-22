@@ -289,9 +289,47 @@ public final class RocketAnimHooks {
 
         int idx = tier.ordinal();
         if (TEXTURE_CACHE[idx] == null) {
-            TEXTURE_CACHE[idx] = buildResourceLocation(RocketAnimConfig.getTexturePath(tier));
+            String path = RocketAnimConfig.getTexturePath(tier);
+            ResourceLocation rl = buildResourceLocation(path);
+            // Verify the texture file exists; fall back to T2's texture if not.
+            // This is only ever called client-side (from rendering), so Minecraft
+            // class is safe to access via reflection.
+            TEXTURE_CACHE[idx] = verifyTextureOrFallback(rl, tier);
         }
         return TEXTURE_CACHE[idx];
+    }
+
+    /**
+     * For textures in our own mod's domain ("gtnhrocketanim:"), verify the file
+     * is actually bundled in the jar by checking via the classloader.
+     * If missing, returns T2's texture instead so nothing renders as a checkerboard.
+     *
+     * Textures in other domains (e.g. "galacticraftmars:") are assumed to exist
+     * in those mods and are returned unchanged.
+     *
+     * This approach avoids any Minecraft class references, so it is server-safe
+     * and not affected by obfuscated method names.
+     */
+    private static ResourceLocation verifyTextureOrFallback(ResourceLocation rl, CargoRocketTier tier) {
+        if (tier == CargoRocketTier.T2) return rl; // T2 lives in galacticraftmars, always present
+
+        // Only check textures we are responsible for providing
+        if (!"gtnhrocketanim".equals(rl.getResourceDomain())) return rl;
+
+        // Check via classloader: file must be at assets/<domain>/<path> inside our jar
+        String resourcePath = "/assets/" + rl.getResourceDomain() + "/" + rl.getResourcePath();
+        java.io.InputStream stream = RocketAnimHooks.class.getResourceAsStream(resourcePath);
+        if (stream == null) {
+            // Texture not bundled — fall back to T2's cargo rocket texture
+            if (RocketAnimConfig.debugLogging) {
+                System.out.println("[GTNH Rocket Anim] Texture not bundled for " + tier.name()
+                    + " (" + rl + "), using T2 fallback. "
+                    + "Add the PNG or override texturePath in config.");
+            }
+            return buildResourceLocation(RocketAnimConfig.getTexturePath(CargoRocketTier.T2));
+        }
+        try { stream.close(); } catch (java.io.IOException ignored) {}
+        return rl;
     }
 
     private static ResourceLocation buildResourceLocation(String path) {
