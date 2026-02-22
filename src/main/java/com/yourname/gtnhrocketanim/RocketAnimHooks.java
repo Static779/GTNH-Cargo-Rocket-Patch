@@ -41,6 +41,26 @@ public final class RocketAnimHooks {
     private RocketAnimHooks() {}
 
     // ==========================================================================
+    //  PENDING SPAWN TIER
+    //  Set by ItemCargoRocketTiered.onItemUse() on the server thread immediately
+    //  BEFORE calling new EntityCargoRocket(...) so that:
+    //    • hookGetFuelTankCapacity() returns the right capacity during super()
+    //    • hookGetSizeInventory() returns the right slot count during field-init
+    //    • hookPostConstructorTierInit() caches and resizes for the right tier
+    //  Cleared again as soon as the constructor returns.
+    // ==========================================================================
+
+    private static final ThreadLocal<CargoRocketTier> PENDING_SPAWN_TIER = new ThreadLocal<>();
+
+    public static void setPendingSpawnTier(CargoRocketTier tier) {
+        PENDING_SPAWN_TIER.set(tier);
+    }
+
+    public static void clearPendingSpawnTier() {
+        PENDING_SPAWN_TIER.remove();
+    }
+
+    // ==========================================================================
     //  REFLECTION SETUP
     //  All Galacticraft fields are accessed via reflection since GC is not a
     //  compile-time dependency.  Forge types (FluidTank, NBT, etc.) are direct.
@@ -153,6 +173,10 @@ public final class RocketAnimHooks {
      * hookPostConstructorTierInit() will resize it down afterwards.
      */
     public static int hookGetFuelTankCapacity(Object entity) {
+        // Check pending first — set by ItemCargoRocketTiered before constructor
+        CargoRocketTier pending = PENDING_SPAWN_TIER.get();
+        if (pending != null) return RocketAnimConfig.getFuelCapacity(pending);
+
         int ordinal = getRocketTypeOrdinal(entity);
         if (ordinal < 0) {
             return CargoRocketTier.T8.fuelCapacity; // safe max during construction
@@ -174,9 +198,13 @@ public final class RocketAnimHooks {
         int ordinal = getRocketTypeOrdinal(entity);
         if (ordinal < 0) return;
 
-        CargoRocketTier tier = CargoRocketTier.fromRocketTypeOrdinal(ordinal);
-        RocketStateTracker.setCargoTier(RocketStateTracker.id((Entity) entity), tier);
+        // Prefer the pending tier (set by ItemCargoRocketTiered for T5-T8)
+        CargoRocketTier pending = PENDING_SPAWN_TIER.get();
+        CargoRocketTier tier = (pending != null)
+            ? pending
+            : CargoRocketTier.fromRocketTypeOrdinal(ordinal);
 
+        RocketStateTracker.setCargoTier(RocketStateTracker.id((Entity) entity), tier);
         resizeFuelTank(entity, tier);
     }
 
@@ -224,6 +252,10 @@ public final class RocketAnimHooks {
      * ASM HOOK — replaces the body of EntityCargoRocket.getSizeInventory().
      */
     public static int hookGetSizeInventory(Object entity) {
+        // Pending tier set by ItemCargoRocketTiered during construction
+        CargoRocketTier pending = PENDING_SPAWN_TIER.get();
+        if (pending != null) return RocketAnimConfig.getSlotsCount(pending);
+
         int ordinal = getRocketTypeOrdinal(entity);
         if (ordinal < 0) return 0;
         // Try the cache first; fall back to ordinal mapping
