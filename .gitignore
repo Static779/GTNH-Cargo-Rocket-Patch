@@ -24,3 +24,6 @@ Thumbs.db
 # Logs
 *.log
 logs/
+
+# Extracted reference assets (not part of the mod build)
+/assets/
