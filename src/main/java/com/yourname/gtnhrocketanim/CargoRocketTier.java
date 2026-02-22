@@ -26,7 +26,7 @@ public enum CargoRocketTier {
     /** T1 — Moon-class cargo rocket (mirrors GC Tier-1 rocket). */
     T1(9,   1000, 3,
        0.05, 0.5, 6.0,  0.6,
-       "gtnhrocketanim:textures/model/cargoRocketT1.png",
+       "galacticraftcore:textures/model/rocketT1.png",
        new int[]{ 28 }),                    // Moon only
 
     /** T2 — Mars-class cargo rocket (mirrors GC Tier-2 / existing cargo rocket). */
@@ -38,41 +38,41 @@ public enum CargoRocketTier {
     /** T3 — Asteroid-class cargo rocket (mirrors GC Tier-3). */
     T3(54,  2000, 2,
        0.10, 1.0, 10.0, 1.0,
-       "gtnhrocketanim:textures/model/cargoRocketT3.png",
+       "galacticraftasteroids:textures/model/tier3rocket.png",
        new int[]{ 28, 29, 30 }),           // + Asteroids (dim 30)
 
     /** T4 — Inner solar system cargo (GalaxySpace Tier-4, Dense Hydrazine). */
     T4(81,  3000, 1,
        0.13, 1.3, 12.0, 1.3,
-       "gtnhrocketanim:textures/model/cargoRocketT4.png",
+       "galaxyspace:textures/model/tier4rocket.png",
        // Mercury=37, Phobos=38, Venus=39, Deimos=40, Ceres=42, Jupiter=43, Io=45
        new int[]{ 28, 29, 30, 37, 38, 39, 40, 42, 43, 45 }),
 
     /** T5 — Jupiter/Saturn belt cargo (GalaxySpace Tier-5, Purple Fuel CN3H7O3). */
     T5(108, 4000, 1,
        0.16, 1.6, 14.0, 1.6,
-       "gtnhrocketanim:textures/model/cargoRocketT5.png",
+       "galaxyspace:textures/model/tier5rocket.png",
        // + Ganymede=35, Europa=36, Saturn=41, Callisto=44
        new int[]{ 28, 29, 30, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45 }),
 
     /** T6 — Uranus/Neptune belt cargo (GalaxySpace Tier-6, Purple Fuel CN3H7O3). */
     T6(135, 5000, 1,
        0.20, 2.0, 16.0, 2.0,
-       "gtnhrocketanim:textures/model/cargoRocketT6.png",
+       "galaxyspace:textures/model/tier6rocket.png",
        // + Titan=46, Neptune=47, Neptune moons=48, Uranus=86
        new int[]{ 28, 29, 30, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 86 }),
 
     /** T7 — Dwarf-planet / Kuiper belt cargo (GalaxySpace Tier-7, Green Fuel H8N4C2O4). */
     T7(162, 6000, 1,
        0.25, 2.5, 18.0, 2.5,
-       "gtnhrocketanim:textures/model/cargoRocketT7.png",
+       "galaxyspace:textures/model/tier7rocket.png",
        // + Makemake=25, Pluto=49, Haumea=83, Vega-B=84, T-Ceti-E=85
        new int[]{ 25, 28, 29, 30, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 83, 84, 85, 86 }),
 
     /** T8 — Interstellar cargo (GalaxySpace Tier-8, Green Fuel H8N4C2O4). */
     T8(189, 8000, 1,
        0.30, 3.0, 20.0, 3.0,
-       "gtnhrocketanim:textures/model/cargoRocketT8.png",
+       "galaxyspace:textures/model/tier8rocket.png",
        null);   // null = no dimension restriction
 
     // ------------------------------------------------------------------
@@ -106,8 +106,10 @@ public enum CargoRocketTier {
 
     /**
      * Default texture ResourceLocation in "domain:path" format.
-     * T2 reuses the existing cargoRocket.png from Galacticraft.
-     * T1, T3-T8 require new textures placed in assets/gtnhrocketanim/textures/model/.
+     * T2 uses cargoRocket.png from Galacticraft Mars.
+     * T1 uses rocketT1.png from Galacticraft Core.
+     * T3 uses tier3rocket.png from Galacticraft Asteroids.
+     * T4-T8 use the corresponding tierXrocket.png from GalaxySpace.
      * Override per-tier in gtnhrocketanim.cfg (tierX_texturePath).
      */
     public final String defaultTexturePath;
