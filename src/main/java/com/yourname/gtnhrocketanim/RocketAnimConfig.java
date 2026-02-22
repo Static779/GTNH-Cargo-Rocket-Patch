@@ -251,9 +251,11 @@ public final class RocketAnimConfig {
                 tier.maxDescentSpeed,
                 "Maximum landing descent speed (blocks/tick).").getDouble(tier.maxDescentSpeed);
 
-            tierTexturePath[i] = cfg.getString("texturePath", cat,
-                tier.defaultTexturePath,
-                "Texture ResourceLocation: \"domain:path/to/texture.png\".");
+            tierTexturePath[i] = migrateTexturePath(
+                cfg.getString("texturePath", cat,
+                    tier.defaultTexturePath,
+                    "Texture ResourceLocation: \"domain:path/to/texture.png\"."),
+                tier, cfg, cat);
 
             tierFuelFluid[i] = cfg.getString("fuelFluid", cat,
                 tier.getDefaultRequiredFuelFluid(),
@@ -321,6 +323,27 @@ public final class RocketAnimConfig {
     // ------------------------------------------------------------------
     //  Helpers
     // ------------------------------------------------------------------
+
+    /**
+     * If a texture path stored in the config is the old stale
+     * "gtnhrocketanim:textures/model/cargoRocketTX.png" placeholder
+     * (these were never bundled in the jar), silently replace it with
+     * the current default from CargoRocketTier and mark the config dirty
+     * so it is rewritten on shutdown.
+     */
+    private static String migrateTexturePath(String stored, CargoRocketTier tier,
+                                              Configuration cfg, String cat) {
+        if (stored != null && stored.startsWith("gtnhrocketanim:textures/model/cargoRocket")) {
+            String migrated = tier.defaultTexturePath;
+            // Write the corrected value back so the cfg file is updated on save
+            cfg.get(cat, "texturePath", migrated,
+                "Texture ResourceLocation: \"domain:path/to/texture.png\".").set(migrated);
+            System.out.println("[GTNH Rocket Anim] Migrated stale texture path for "
+                + tier.name() + ": " + stored + " -> " + migrated);
+            return migrated;
+        }
+        return stored;
+    }
 
     private static String dimsToString(int[] dims) {
         if (dims == null) return "";
