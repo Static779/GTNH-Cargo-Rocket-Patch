@@ -147,8 +147,10 @@ public class RocketAnimTransformer implements IClassTransformer {
             }
 
             // (8) getSizeInventory — full body replacement
-            if ("getSizeInventory".equals(mn.name) && "()I".equals(mn.desc)) {
-                System.out.println("[GTNH Rocket Anim] Patching getSizeInventory()I");
+            // In production the method retains its obfuscated name func_70302_i_
+            if (("getSizeInventory".equals(mn.name) || "func_70302_i_".equals(mn.name))
+                    && "()I".equals(mn.desc)) {
+                System.out.println("[GTNH Rocket Anim] Patching getSizeInventory / func_70302_i_()I");
                 patchGetSizeInventory(mn);
                 patchedSizeInventory = true;
             }

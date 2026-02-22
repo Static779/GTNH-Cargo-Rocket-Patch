@@ -4,10 +4,10 @@ import net.minecraft.entity.Entity;
 import net.minecraft.nbt.NBTTagCompound;
 import net.minecraft.util.ResourceLocation;
 import net.minecraft.world.World;
+import net.minecraftforge.fluids.FluidStack;
 import net.minecraftforge.fluids.FluidTank;
 
 import java.lang.reflect.Field;
-import java.lang.reflect.Method;
 
 /**
  * Entry point methods called by ASM-injected hooks.
@@ -66,11 +66,16 @@ public final class RocketAnimHooks {
     //  compile-time dependency.  Forge types (FluidTank, NBT, etc.) are direct.
     // ==========================================================================
 
-    private static Field  rocketTypeField    = null; // EntityCargoRocket.rocketType
-    private static Field  entityFuelTankField = null; // EntitySpaceshipBase.fuelTank
-    private static Field  fluidTankCapField   = null; // FluidTank.capacity (Forge)
-    private static Method fluidTankDrainMethod = null; // FluidTank.drain(int, boolean)
+    private static Field  rocketTypeField     = null; // EntityCargoRocket.rocketType
+    private static Field  entityFuelTankField  = null; // EntitySpaceshipBase.fuelTank
     private static boolean reflectionInitialized = false;
+
+    /**
+     * GC's original hardcoded fuel capacity for EntityCargoRocket.
+     * Matched from decompile: public int getFuelTankCapacity() { return 2000; }
+     * We return this for T1/T2 so original GC rockets are completely unaffected.
+     */
+    private static final int GC_CARGO_FUEL_CAPACITY = 2000;
 
     /**
      * Lazily initialise all reflection handles.
@@ -96,25 +101,6 @@ public final class RocketAnimHooks {
             entityFuelTankField.setAccessible(true);
         } catch (Exception e) {
             System.out.println("[GTNH Rocket Anim] WARN: Could not reflect fuelTank field: " + e);
-        }
-
-        // FluidTank.capacity field name — try common names
-        for (String name : new String[]{ "capacity", "tankCapacity" }) {
-            try {
-                fluidTankCapField = FluidTank.class.getDeclaredField(name);
-                fluidTankCapField.setAccessible(true);
-                break;
-            } catch (NoSuchFieldException ignored) {}
-        }
-        if (fluidTankCapField == null) {
-            System.out.println("[GTNH Rocket Anim] WARN: Could not find FluidTank capacity field. " +
-                               "Fuel-tank resizing will be disabled.");
-        }
-
-        try {
-            fluidTankDrainMethod = FluidTank.class.getMethod("drain", int.class, boolean.class);
-        } catch (Exception e) {
-            System.out.println("[GTNH Rocket Anim] WARN: Could not reflect FluidTank.drain: " + e);
         }
     }
 
@@ -173,15 +159,32 @@ public final class RocketAnimHooks {
      * hookPostConstructorTierInit() will resize it down afterwards.
      */
     public static int hookGetFuelTankCapacity(Object entity) {
-        // Check pending first — set by ItemCargoRocketTiered before constructor
+        // Priority 1: pending tier (set by ItemCargoRocketTiered before construction)
         CargoRocketTier pending = PENDING_SPAWN_TIER.get();
-        if (pending != null) return RocketAnimConfig.getFuelCapacity(pending);
-
-        int ordinal = getRocketTypeOrdinal(entity);
-        if (ordinal < 0) {
-            return CargoRocketTier.T8.fuelCapacity; // safe max during construction
+        if (pending != null) {
+            if (pending == CargoRocketTier.T1 || pending == CargoRocketTier.T2)
+                return GC_CARGO_FUEL_CAPACITY;
+            return RocketAnimConfig.getFuelCapacity(pending);
         }
-        CargoRocketTier tier = CargoRocketTier.fromRocketTypeOrdinal(ordinal);
+
+        // Priority 2: state cache (set by hookPostConstructorTierInit / hookReadNbt)
+        // This correctly resolves T5-T8 whose rocketType ordinal only reaches TIER_4.
+        int entityId = ((Entity) entity).getEntityId();
+        CargoRocketTier cached = RocketStateTracker.getCargoTier(entityId);
+        CargoRocketTier tier;
+        if (cached != CargoRocketTier.T2) {
+            // Cache holds a specific tier (T1, T3-T8) — use it
+            tier = cached;
+        } else {
+            // Fall back to rocketType ordinal (construction phase, T1-T4)
+            int ordinal = getRocketTypeOrdinal(entity);
+            if (ordinal < 0) return CargoRocketTier.T8.fuelCapacity; // safe max
+            tier = CargoRocketTier.fromRocketTypeOrdinal(ordinal);
+        }
+
+        // T1/T2: return GC's original value so native GC rockets are unaffected
+        if (tier == CargoRocketTier.T1 || tier == CargoRocketTier.T2)
+            return GC_CARGO_FUEL_CAPACITY;
         return RocketAnimConfig.getFuelCapacity(tier);
     }
 
@@ -279,8 +282,18 @@ public final class RocketAnimHooks {
     private static volatile boolean modelsInitialized  = false;
 
     /**
+     * Scale correction applied when rendering T3-T8 OBJ models inside renderBuggy.
+     *
+     * renderBuggy applies glScalef(0.4, 0.4, 0.4) before calling renderAll.
+     * GC Asteroids (T3) and GalaxySpace (T4-T8) renderers both apply glScalef(0.9, 0.9, 0.9).
+     * To match the intended size: 0.9 / 0.4 = 2.25
+     */
+    private static final double TIER_MODEL_SCALE = 2.25;
+
+    /**
      * Replaces model.renderAll() inside renderBuggy.
-     * For T1/T2 calls the original cargo model; for T3-T8 calls the tier model.
+     * For T1/T2: calls the original cargo model unchanged.
+     * For T3-T8: applies a 2.25x scale correction then calls the tier OBJ model.
      *
      * @param defaultModel  the cargo rocket IModelCustom (already on the stack)
      * @param entity        the EntityCargoRocket being rendered (ALOAD 1 from renderBuggy)
@@ -302,7 +315,15 @@ public final class RocketAnimHooks {
         ensureTierModels();
 
         Object model = TIER_MODELS[tier.ordinal()];
-        invokeRenderAll(model != null ? model : defaultModel);
+        if (model != null) {
+            // Push a corrective scale so the GS/GCA model renders at its intended size
+            glPushMatrix();
+            glScaled(TIER_MODEL_SCALE);
+            invokeRenderAll(model);
+            glPopMatrix();
+        } else {
+            invokeRenderAll(defaultModel);
+        }
     }
 
     private static void invokeRenderAll(Object model) {
@@ -313,6 +334,40 @@ public final class RocketAnimHooks {
                 System.out.println("[GTNH Rocket Anim] renderAll failed: " + e);
             }
         }
+    }
+
+    // --- GL helpers (cached reflection — LWJGL not available on server) ---
+    private static java.lang.reflect.Method GL_PUSH = null;
+    private static java.lang.reflect.Method GL_POP  = null;
+    private static java.lang.reflect.Method GL_SCALE = null;
+    private static volatile boolean glReady = false;
+
+    private static synchronized void ensureGL() {
+        if (glReady) return;
+        glReady = true;
+        try {
+            Class<?> gl = Class.forName("org.lwjgl.opengl.GL11");
+            GL_PUSH  = gl.getMethod("glPushMatrix");
+            GL_POP   = gl.getMethod("glPopMatrix");
+            GL_SCALE = gl.getMethod("glScaled", double.class, double.class, double.class);
+        } catch (Exception e) {
+            // Expected on the server — hookRenderModel is never called server-side
+        }
+    }
+
+    private static void glPushMatrix() {
+        ensureGL();
+        if (GL_PUSH != null) try { GL_PUSH.invoke(null); } catch (Exception ignored) {}
+    }
+
+    private static void glPopMatrix() {
+        ensureGL();
+        if (GL_POP != null) try { GL_POP.invoke(null); } catch (Exception ignored) {}
+    }
+
+    private static void glScaled(double f) {
+        ensureGL();
+        if (GL_SCALE != null) try { GL_SCALE.invoke(null, f, f, f); } catch (Exception ignored) {}
     }
 
     private static synchronized void ensureTierModels() {
@@ -426,24 +481,62 @@ public final class RocketAnimHooks {
     //  FUEL TANK RESIZING (shared helper)
     // ==========================================================================
 
+    /**
+     * Replaces the entity's FluidTank with a TieredFluidTank that:
+     *  - Has the correct capacity for the tier (raw × rocketFuelFactor)
+     *  - Only accepts the tier's required fuel fluid
+     *
+     * For T1/T2 we keep GC's original capacity (2000 × factor) and restrict to "fuel".
+     * Any valid fluid already in the old tank is transferred to the new one.
+     */
     private static void resizeFuelTank(Object entity, CargoRocketTier tier) {
-        if (entityFuelTankField == null || fluidTankCapField == null) return;
+        if (entityFuelTankField == null) return;
         try {
-            FluidTank tank = (FluidTank) entityFuelTankField.get(entity);
-            if (tank == null) return;
+            FluidTank oldTank = (FluidTank) entityFuelTankField.get(entity);
+            if (oldTank == null) return;
 
             int fuelFactor = getGCFuelFactor();
-            int newCapacity = RocketAnimConfig.getFuelCapacity(tier) * fuelFactor;
+            int newCapacity;
+            String acceptedFluid;
 
-            fluidTankCapField.setInt(tank, newCapacity);
+            if (tier == CargoRocketTier.T1 || tier == CargoRocketTier.T2) {
+                // Preserve GC's original values exactly
+                newCapacity   = GC_CARGO_FUEL_CAPACITY * fuelFactor;
+                acceptedFluid = "fuel";
+            } else {
+                newCapacity   = RocketAnimConfig.getFuelCapacity(tier) * fuelFactor;
+                acceptedFluid = RocketAnimConfig.getFuelFluid(tier);
+            }
 
-            // Trim excess fluid so the tank state is consistent
-            int currentAmount = tank.getFluidAmount();
-            if (currentAmount > newCapacity && fluidTankDrainMethod != null) {
-                fluidTankDrainMethod.invoke(tank, currentAmount - newCapacity, true);
+            // If the existing tank is already a correctly configured TieredFluidTank, skip
+            if (oldTank instanceof TieredFluidTank) {
+                TieredFluidTank tft = (TieredFluidTank) oldTank;
+                if (tft.getCapacity() == newCapacity
+                        && acceptedFluid != null && acceptedFluid.equals(tft.getAcceptedFluid())) {
+                    return;
+                }
+            }
+
+            TieredFluidTank newTank = new TieredFluidTank(newCapacity, acceptedFluid);
+
+            // Transfer any valid fuel already in the old tank
+            FluidStack existing = oldTank.getFluid();
+            if (existing != null && existing.getFluid() != null) {
+                String name = existing.getFluid().getName();
+                if (acceptedFluid == null || acceptedFluid.equals(name)) {
+                    int amount = Math.min(existing.amount, newCapacity);
+                    newTank.fill(new FluidStack(existing.getFluid(), amount), true);
+                }
+            }
+
+            entityFuelTankField.set(entity, newTank);
+
+            if (RocketAnimConfig.debugLogging) {
+                System.out.println("[GTNH Rocket Anim] resizeFuelTank: tier=" + tier.name()
+                    + " capacity=" + newCapacity + " fluid=" + acceptedFluid);
             }
         } catch (Exception e) {
-            System.out.println("[GTNH Rocket Anim] WARN: fuel tank resize failed: " + e);
+            System.out.println("[GTNH Rocket Anim] WARN: fuel tank replacement failed: " + e);
         }
     }
 

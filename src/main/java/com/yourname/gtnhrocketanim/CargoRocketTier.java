@@ -4,8 +4,8 @@ package com.yourname.gtnhrocketanim;
  * Defines properties for each tier of cargo rocket, mirroring the GTNH rocket progression.
  *
  * Tier is determined by the EntityCargoRocket's rocketType field ordinal:
- *   ordinal 0 (DEFAULT)    -> T1 ( 9 slots,  1000 mB,  Rocket Fuel)
- *   ordinal 1 (INVENTORY27)-> T2 (27 slots,  1500 mB,  Rocket Fuel)  [legacy default]
+ *   ordinal 0 (DEFAULT)    -> T1 ( 9 slots,  2000 mB,  Rocket Fuel)
+ *   ordinal 1 (INVENTORY27)-> T2 (27 slots,  2000 mB,  Rocket Fuel)  [matches GC original]
  *   ordinal 2 (INVENTORY36)-> T3 (54 slots,  2000 mB,  Rocket Fuel)
  *   ordinal 3 (INVENTORY54)-> T4 (81 slots,  3000 mB,  Dense Hydrazine)
  *
@@ -24,13 +24,13 @@ public enum CargoRocketTier {
     // ------------------------------------------------------------------
 
     /** T1 — Moon-class cargo rocket (original GC T1 cargo rocket, ordinal 0). */
-    T1(9,   1000, 3,
+    T1(9,   2000, 3,
        0.05, 0.5, 6.0,  0.6,
        "galacticraftmars:textures/model/cargoRocket.png",
        new int[]{ 28 }),                    // Moon only
 
     /** T2 — Mars-class cargo rocket (mirrors GC Tier-2 / existing cargo rocket). */
-    T2(27,  1500, 2,
+    T2(27,  2000, 2,
        0.08, 0.8, 8.0,  0.8,
        "galacticraftmars:textures/model/cargoRocket.png",
        new int[]{ 28, 29 }),               // Moon + Mars
