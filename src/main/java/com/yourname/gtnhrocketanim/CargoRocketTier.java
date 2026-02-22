@@ -23,10 +23,10 @@ public enum CargoRocketTier {
     //         defaultAllowedDimensions (null = unrestricted)
     // ------------------------------------------------------------------
 
-    /** T1 — Moon-class cargo rocket (mirrors GC Tier-1 rocket). */
+    /** T1 — Moon-class cargo rocket (original GC T1 cargo rocket, ordinal 0). */
     T1(9,   1000, 3,
        0.05, 0.5, 6.0,  0.6,
-       "galacticraftcore:textures/model/rocketT1.png",
+       "galacticraftmars:textures/model/cargoRocket.png",
        new int[]{ 28 }),                    // Moon only
 
     /** T2 — Mars-class cargo rocket (mirrors GC Tier-2 / existing cargo rocket). */
@@ -106,8 +106,7 @@ public enum CargoRocketTier {
 
     /**
      * Default texture ResourceLocation in "domain:path" format.
-     * T2 uses cargoRocket.png from Galacticraft Mars.
-     * T1 uses rocketT1.png from Galacticraft Core.
+     * T1 and T2 both use cargoRocket.png from Galacticraft Mars (original cargo texture).
      * T3 uses tier3rocket.png from Galacticraft Asteroids.
      * T4-T8 use the corresponding tierXrocket.png from GalaxySpace.
      * Override per-tier in gtnhrocketanim.cfg (tierX_texturePath).
