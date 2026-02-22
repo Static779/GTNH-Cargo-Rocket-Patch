@@ -482,12 +482,14 @@ public final class RocketAnimHooks {
     // ==========================================================================
 
     /**
-     * Replaces the entity's FluidTank with a TieredFluidTank that:
-     *  - Has the correct capacity for the tier (raw × rocketFuelFactor)
-     *  - Only accepts the tier's required fuel fluid
+     * Replaces the entity's FluidTank with a TieredFluidTank sized for the tier.
      *
-     * For T1/T2 we keep GC's original capacity (2000 × factor) and restrict to "fuel".
-     * Any valid fluid already in the old tank is transferred to the new one.
+     * The TieredFluidTank accepts any valid GC rocket fuel (testFuel logic).
+     * Tier-specific fuel enforcement is done at the loader level via
+     * hookFuelLoaderTierCheck(), not inside the tank.
+     *
+     * For T1/T2 we keep GC's original capacity (2000 × factor).
+     * Any valid fuel already in the old tank is transferred to the new one.
      */
     private static void resizeFuelTank(Object entity, CargoRocketTier tier) {
         if (entityFuelTankField == null) return;
@@ -496,48 +498,85 @@ public final class RocketAnimHooks {
             if (oldTank == null) return;
 
             int fuelFactor = getGCFuelFactor();
-            int newCapacity;
-            String acceptedFluid;
+            int newCapacity = (tier == CargoRocketTier.T1 || tier == CargoRocketTier.T2)
+                    ? GC_CARGO_FUEL_CAPACITY * fuelFactor
+                    : RocketAnimConfig.getFuelCapacity(tier) * fuelFactor;
 
-            if (tier == CargoRocketTier.T1 || tier == CargoRocketTier.T2) {
-                // Preserve GC's original values exactly
-                newCapacity   = GC_CARGO_FUEL_CAPACITY * fuelFactor;
-                acceptedFluid = "fuel";
-            } else {
-                newCapacity   = RocketAnimConfig.getFuelCapacity(tier) * fuelFactor;
-                acceptedFluid = RocketAnimConfig.getFuelFluid(tier);
+            // Skip if already a correctly-sized TieredFluidTank
+            if (oldTank instanceof TieredFluidTank && oldTank.getCapacity() == newCapacity) {
+                return;
             }
 
-            // If the existing tank is already a correctly configured TieredFluidTank, skip
-            if (oldTank instanceof TieredFluidTank) {
-                TieredFluidTank tft = (TieredFluidTank) oldTank;
-                if (tft.getCapacity() == newCapacity
-                        && acceptedFluid != null && acceptedFluid.equals(tft.getAcceptedFluid())) {
-                    return;
-                }
-            }
-
-            TieredFluidTank newTank = new TieredFluidTank(newCapacity, acceptedFluid);
+            TieredFluidTank newTank = new TieredFluidTank(newCapacity);
 
             // Transfer any valid fuel already in the old tank
             FluidStack existing = oldTank.getFluid();
             if (existing != null && existing.getFluid() != null) {
-                String name = existing.getFluid().getName();
-                if (acceptedFluid == null || acceptedFluid.equals(name)) {
-                    int amount = Math.min(existing.amount, newCapacity);
-                    newTank.fill(new FluidStack(existing.getFluid(), amount), true);
-                }
+                int amount = Math.min(existing.amount, newCapacity);
+                newTank.fill(new FluidStack(existing.getFluid(), amount), true);
             }
 
             entityFuelTankField.set(entity, newTank);
 
             if (RocketAnimConfig.debugLogging) {
                 System.out.println("[GTNH Rocket Anim] resizeFuelTank: tier=" + tier.name()
-                    + " capacity=" + newCapacity + " fluid=" + acceptedFluid);
+                    + " capacity=" + newCapacity);
             }
         } catch (Exception e) {
             System.out.println("[GTNH Rocket Anim] WARN: fuel tank replacement failed: " + e);
         }
+    }
+
+    // ==========================================================================
+    //  FUEL LOADER TIER CHECK
+    //  Called from patched TileEntityFuelLoader.isCorrectFuel().
+    //  Enforces that the fuel in the loader matches the expected fluid for the
+    //  cargo rocket's tier BEFORE the loader converts it to standard GC fuel.
+    // ==========================================================================
+
+    /**
+     * ASM HOOK — injected at the START of TileEntityFuelLoader.isCorrectFuel(IFuelable).
+     *
+     * Returns false to BLOCK the fuel transfer (loader refuses to fill the rocket).
+     * Returns true to ALLOW the transfer (GC's normal check continues).
+     *
+     * Only applies to EntityCargoRocket instances — other rocket types are left
+     * to GC's standard RocketFuels class-based check.
+     *
+     * @param fuelable       the rocket entity (from this.attachedFuelable)
+     * @param loaderFluidObj the FluidStack in the loader's own tank (may be null)
+     */
+    public static boolean hookFuelLoaderTierCheck(Object fuelable, Object loaderFluidObj) {
+        if (fuelable == null) return true;
+
+        // Only intercept EntityCargoRocket
+        if (!"micdoodle8.mods.galacticraft.planets.mars.entities.EntityCargoRocket"
+                .equals(fuelable.getClass().getName())) {
+            return true;
+        }
+
+        // T1/T2: no extra restriction — standard GC fuel accepted
+        int entityId = ((Entity) fuelable).getEntityId();
+        CargoRocketTier tier = RocketStateTracker.getCargoTier(entityId);
+        if (tier == CargoRocketTier.T1 || tier == CargoRocketTier.T2) return true;
+
+        // No fluid in loader — let GC handle it (will return false downstream)
+        FluidStack loaderFluid = (FluidStack) loaderFluidObj;
+        if (loaderFluid == null || loaderFluid.getFluid() == null) return true;
+
+        String loaderFluidName = loaderFluid.getFluid().getName();
+        String expectedFluid   = RocketAnimConfig.getFuelFluid(tier);
+
+        // No restriction configured for this tier
+        if (expectedFluid == null || expectedFluid.isEmpty()) return true;
+
+        boolean allowed = loaderFluidName.equals(expectedFluid);
+        if (!allowed && RocketAnimConfig.debugLogging) {
+            System.out.println("[GTNH Rocket Anim] Fuel loader BLOCKED for tier=" + tier.name()
+                + " — expected fluid=\"" + expectedFluid + "\""
+                + " but loader has \"" + loaderFluidName + "\"");
+        }
+        return allowed;
     }
 
     /** Returns ConfigManagerCore.rocketFuelFactor via reflection, defaulting to 1. */

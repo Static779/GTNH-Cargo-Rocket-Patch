@@ -148,12 +148,30 @@ public enum CargoRocketTier {
      * Values must match what GalaxySpace / Galacticraft register.
      * Override per-tier in gtnhrocketanim.cfg (tierX_fuelFluid).
      */
+    /**
+     * Returns the Forge fluid registry name that the GC fuel loader must contain
+     * to be allowed to fill this tier of cargo rocket.
+     *
+     * These names match the GT++ (miscutils) fluid registrations observed in
+     * GTNH 2.8.x game logs.  They are overridable per-tier in gtnhrocketanim.cfg
+     * via the tierX_fuelFluid config key.
+     *
+     * Note: the rocket TANK itself accepts any valid GC fuel (via testFuel logic).
+     * These names are checked at the LOADER level by hookFuelLoaderTierCheck().
+     *
+     * T1-T3: standard GC rocket fuel ("fuel" / "fuelgc")
+     * T4:    GT++ Rocket Fuel Mix A  ("fluid.rocketfuelmixa")
+     * T5-T6: GT++ Rocket Fuel Mix B  ("fluid.rocketfuelmixb")
+     * T7:    GT++ Rocket Fuel Mix C  ("fluid.rocketfuelmixc")
+     * T8:    GT++ Rocket Fuel Mix D  ("fluid.rocketfuelmixd")
+     */
     public String getDefaultRequiredFuelFluid() {
         switch (this.ordinal()) {
-            case 0: case 1: case 2: return "fuel";           // GC Rocket Fuel (T1-T3)
-            case 3:                 return "denseHydrazine"; // Dense Hydrazine (T4)
-            case 4: case 5:         return "purpleRocketFuel"; // CN3H7O3 (T5-T6)
-            default:                return "greenRocketFuel";  // H8N4C2O4 (T7-T8)
+            case 0: case 1: case 2: return "fuel";                  // T1-T3: standard GC rocket fuel
+            case 3:                 return "fluid.rocketfuelmixa";  // T4: GT++ Mix A
+            case 4: case 5:         return "fluid.rocketfuelmixb";  // T5-T6: GT++ Mix B
+            case 6:                 return "fluid.rocketfuelmixc";  // T7: GT++ Mix C
+            default:                return "fluid.rocketfuelmixd";  // T8: GT++ Mix D
         }
     }
 

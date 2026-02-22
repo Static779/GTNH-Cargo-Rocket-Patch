@@ -22,6 +22,9 @@ import org.objectweb.asm.tree.*;
  * Patches RenderCargoRocket:
  *  9) renderBuggy(...)          — swaps static texture with tier-specific one
  * 10) func_110779_a(...)        — same, for the entity-texture delegate
+ *
+ * Patches TileEntityFuelLoader:
+ * 11) isCorrectFuel(IFuelable)  — enforces tier-specific fuel type before GC's class check
  */
 public class RocketAnimTransformer implements IClassTransformer {
 
@@ -36,6 +39,14 @@ public class RocketAnimTransformer implements IClassTransformer {
             "micdoodle8.mods.galacticraft.planets.mars.client.render.entity.RenderCargoRocket";
     private static final String RENDER_CLASS =
             "micdoodle8/mods/galacticraft/planets/mars/client/render/entity/RenderCargoRocket";
+
+    // ---- TileEntityFuelLoader ----
+    private static final String FUEL_LOADER_DOT =
+            "micdoodle8.mods.galacticraft.core.tile.TileEntityFuelLoader";
+    private static final String FUEL_LOADER =
+            "micdoodle8/mods/galacticraft/core/tile/TileEntityFuelLoader";
+    private static final String I_FUELABLE =
+            "micdoodle8/mods/galacticraft/api/entity/IFuelable";
 
     // Superclass where landing/targetVec/launchPhase/timeSinceLaunch live
     private static final String AUTO_ROCKET =
@@ -59,6 +70,7 @@ public class RocketAnimTransformer implements IClassTransformer {
     private boolean patchedSizeInventory       = false;
     private boolean patchedRenderBuggy         = false;
     private boolean patchedGetEntityTexture    = false;
+    private boolean patchedFuelLoader          = false;
 
     // ---- Hooks class (internal ASM name) ----
     private static final String HOOKS =
@@ -73,6 +85,9 @@ public class RocketAnimTransformer implements IClassTransformer {
         }
         if (RENDER_CLASS_DOT.equals(name)) {
             return transformRenderCargoRocket(basicClass);
+        }
+        if (FUEL_LOADER_DOT.equals(name)) {
+            return transformFuelLoader(basicClass);
         }
         return basicClass;
     }
@@ -203,6 +218,49 @@ public class RocketAnimTransformer implements IClassTransformer {
 
         logMissing("RenderCargoRocket.renderBuggy", patchedRenderBuggy);
         logMissing("RenderCargoRocket.func_110779_a / getEntityTexture", patchedGetEntityTexture);
+
+        ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_MAXS | ClassWriter.COMPUTE_FRAMES);
+        cn.accept(cw);
+        return cw.toByteArray();
+    }
+
+    // ==========================================================================
+    //  TileEntityFuelLoader transform
+    // ==========================================================================
+
+    /**
+     * Patches TileEntityFuelLoader.isCorrectFuel(IFuelable) to enforce
+     * tier-specific fuel restrictions before GC's normal class-based check.
+     *
+     * The injection calls RocketAnimHooks.hookFuelLoaderTierCheck(fuelable, loaderFluid)
+     * at the very start of the method.  If the hook returns false, we immediately
+     * return false (block the loader).  If true, the original GC logic runs normally.
+     *
+     * This MUST happen before GC converts the loader fluid to standard "fuel",
+     * so we intercept the raw loader tank fluid here.
+     */
+    private byte[] transformFuelLoader(byte[] basicClass) {
+        System.out.println("[GTNH Rocket Anim] Transforming TileEntityFuelLoader");
+
+        ClassNode cn = new ClassNode();
+        new ClassReader(basicClass).accept(cn, 0);
+
+        System.out.println("[GTNH Rocket Anim] TileEntityFuelLoader methods found:");
+        for (MethodNode mn : cn.methods) {
+            System.out.println("[GTNH Rocket Anim]   " + mn.name + mn.desc);
+        }
+
+        for (MethodNode mn : cn.methods) {
+            // Match isCorrectFuel(IFuelable)Z — the descriptor contains the IFuelable interface
+            if ("isCorrectFuel".equals(mn.name) && mn.desc.contains(I_FUELABLE)) {
+                System.out.println("[GTNH Rocket Anim] Patching TileEntityFuelLoader.isCorrectFuel" + mn.desc);
+                injectFuelLoaderTierCheck(mn);
+                patchedFuelLoader = true;
+                break;
+            }
+        }
+
+        logMissing("TileEntityFuelLoader.isCorrectFuel", patchedFuelLoader);
 
         ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_MAXS | ClassWriter.COMPUTE_FRAMES);
         cn.accept(cw);
@@ -458,6 +516,51 @@ public class RocketAnimTransformer implements IClassTransformer {
         mn.maxStack  = 0;
         mn.maxLocals = 0;
         System.out.println("[GTNH Rocket Anim] getSizeInventory patched");
+    }
+
+    /**
+     * Injects at the START of TileEntityFuelLoader.isCorrectFuel(IFuelable):
+     *
+     *   if (!RocketAnimHooks.hookFuelLoaderTierCheck(fuelable, this.fuelTank.getFluid()))
+     *       return false;
+     *   // ... original GC check follows ...
+     *
+     * Stack on entry: [this, fuelable]
+     * We push fuelable (ALOAD_1), then this.fuelTank.getFluid() (ALOAD_0 + GETFIELD + INVOKEVIRTUAL),
+     * call the hook, and branch.
+     */
+    private void injectFuelLoaderTierCheck(MethodNode mn) {
+        InsnList guard = new InsnList();
+
+        // arg: fuelable (slot 1 — first method parameter)
+        guard.add(new VarInsnNode(Opcodes.ALOAD, 1));
+
+        // arg: this.fuelTank.getFluid()
+        guard.add(new VarInsnNode(Opcodes.ALOAD, 0));
+        guard.add(new FieldInsnNode(Opcodes.GETFIELD, FUEL_LOADER, "fuelTank",
+                "Lnet/minecraftforge/fluids/FluidTank;"));
+        guard.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL,
+                "net/minecraftforge/fluids/FluidTank", "getFluid",
+                "()Lnet/minecraftforge/fluids/FluidStack;", false));
+
+        // call hook — returns boolean
+        guard.add(new MethodInsnNode(Opcodes.INVOKESTATIC, HOOKS,
+                "hookFuelLoaderTierCheck",
+                "(Ljava/lang/Object;Ljava/lang/Object;)Z", false));
+
+        // if (hook returned true) jump past the early return
+        LabelNode continueLabel = new LabelNode();
+        guard.add(new JumpInsnNode(Opcodes.IFNE, continueLabel)); // IFNE = if non-zero (true)
+
+        // hook returned false — block the fuel transfer
+        guard.add(new InsnNode(Opcodes.ICONST_0));
+        guard.add(new InsnNode(Opcodes.IRETURN));
+
+        guard.add(continueLabel);
+
+        // Insert at the very beginning of the method
+        mn.instructions.insert(guard);
+        System.out.println("[GTNH Rocket Anim] isCorrectFuel tier-check guard injected");
     }
 
     // ==========================================================================
