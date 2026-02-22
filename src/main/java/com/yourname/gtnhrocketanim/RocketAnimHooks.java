@@ -267,6 +267,90 @@ public final class RocketAnimHooks {
         return RocketAnimConfig.getSlotsCount(tier);
     }
 
+    // ==========================================================================
+    //  TIERED ROCKET MODEL RENDERING
+    //  Called in place of model.renderAll() inside RenderCargoRocket.renderBuggy().
+    //  We stay in the SAME GL context (translations/rotations already applied by
+    //  renderBuggy) and simply swap the OBJ geometry for T3-T8.
+    // ==========================================================================
+
+    /** OBJ model objects keyed by CargoRocketTier ordinal. */
+    private static final Object[] TIER_MODELS          = new Object[CargoRocketTier.values().length];
+    private static volatile boolean modelsInitialized  = false;
+
+    /**
+     * Replaces model.renderAll() inside renderBuggy.
+     * For T1/T2 calls the original cargo model; for T3-T8 calls the tier model.
+     *
+     * @param defaultModel  the cargo rocket IModelCustom (already on the stack)
+     * @param entity        the EntityCargoRocket being rendered (ALOAD 1 from renderBuggy)
+     */
+    public static void hookRenderModel(Object defaultModel, Object entity) {
+        CargoRocketTier tier;
+        try {
+            tier = getCargoTierFromEntity((Entity) entity);
+        } catch (Exception e) {
+            invokeRenderAll(defaultModel);
+            return;
+        }
+
+        if (tier == CargoRocketTier.T1 || tier == CargoRocketTier.T2) {
+            invokeRenderAll(defaultModel);
+            return;
+        }
+
+        ensureTierModels();
+
+        Object model = TIER_MODELS[tier.ordinal()];
+        invokeRenderAll(model != null ? model : defaultModel);
+    }
+
+    private static void invokeRenderAll(Object model) {
+        try {
+            model.getClass().getMethod("renderAll").invoke(model);
+        } catch (Exception e) {
+            if (RocketAnimConfig.debugLogging) {
+                System.out.println("[GTNH Rocket Anim] renderAll failed: " + e);
+            }
+        }
+    }
+
+    private static synchronized void ensureTierModels() {
+        if (modelsInitialized) return;
+        modelsInitialized = true;
+
+        try {
+            Class<?> advLoader = Class.forName("net.minecraftforge.client.model.AdvancedModelLoader");
+            java.lang.reflect.Method loadModel =
+                    advLoader.getMethod("loadModel", ResourceLocation.class);
+
+            // T3: GC Asteroids
+            try {
+                TIER_MODELS[CargoRocketTier.T3.ordinal()] = loadModel.invoke(null,
+                        new ResourceLocation("galacticraftasteroids", "models/tier3rocket.obj"));
+                System.out.println("[GTNH Rocket Anim] T3 model loaded");
+            } catch (Exception e) {
+                System.out.println("[GTNH Rocket Anim] Could not load T3 model: " + e);
+            }
+
+            // T4-T8: GalaxySpace
+            for (CargoRocketTier t : new CargoRocketTier[]{
+                    CargoRocketTier.T4, CargoRocketTier.T5, CargoRocketTier.T6,
+                    CargoRocketTier.T7, CargoRocketTier.T8}) {
+                int n = t.ordinal() + 1;
+                try {
+                    TIER_MODELS[t.ordinal()] = loadModel.invoke(null,
+                            new ResourceLocation("galaxyspace", "models/tier" + n + "rocket.obj"));
+                    System.out.println("[GTNH Rocket Anim] T" + n + " model loaded");
+                } catch (Exception e) {
+                    System.out.println("[GTNH Rocket Anim] Could not load T" + n + " model: " + e);
+                }
+            }
+        } catch (Exception e) {
+            System.out.println("[GTNH Rocket Anim] AdvancedModelLoader not available: " + e);
+        }
+    }
+
     /**
      * ASM HOOK — replaces the GETSTATIC cargoRocketTexture in RenderCargoRocket.
      * Returns the tier-appropriate ResourceLocation from a per-tier cache.

@@ -182,6 +182,9 @@ public class RocketAnimTransformer implements IClassTransformer {
             // renderBuggy — the main render method
             if ("renderBuggy".equals(mn.name)) {
                 System.out.println("[GTNH Rocket Anim] Patching RenderCargoRocket.renderBuggy" + mn.desc);
+                // 1) Model-swap guard: T3-T8 delegate to GC/GS renderer and return early
+                patchRenderBuggyModelSwap(mn);
+                // 2) Texture swap for T1/T2 (the fall-through path)
                 patchRenderTexture(mn, 1 /* entity is ALOAD_1 */);
                 patchedRenderBuggy = true;
             }
@@ -458,6 +461,36 @@ public class RocketAnimTransformer implements IClassTransformer {
     // ==========================================================================
     //  RenderCargoRocket patch implementations
     // ==========================================================================
+
+    /**
+     * (9a) In renderBuggy, find the invokeinterface IModelCustom.renderAll()V call
+     * and replace it with hookRenderModel(model, entity).
+     *
+     * Before the invokeinterface the stack is: [..., model]
+     * We insert ALOAD_1 (entity) to make it: [..., model, entity]
+     * Then call hookRenderModel(Object model, Object entity)V instead.
+     *
+     * This keeps ALL of renderBuggy's GL transforms (translate/rotate/scale) intact
+     * and just swaps the OBJ geometry for T3-T8.
+     */
+    private void patchRenderBuggyModelSwap(MethodNode mn) {
+        for (AbstractInsnNode node : mn.instructions.toArray()) {
+            if (node.getOpcode() == Opcodes.INVOKEINTERFACE) {
+                MethodInsnNode min = (MethodInsnNode) node;
+                if ("renderAll".equals(min.name) && "()V".equals(min.desc)) {
+                    // Stack: [..., model]  →  insert entity  →  [..., model, entity]
+                    mn.instructions.insertBefore(node, new VarInsnNode(Opcodes.ALOAD, 1));
+                    // Replace invokeinterface with invokestatic hookRenderModel
+                    mn.instructions.set(node, new MethodInsnNode(Opcodes.INVOKESTATIC, HOOKS,
+                            "hookRenderModel",
+                            "(Ljava/lang/Object;Ljava/lang/Object;)V", false));
+                    System.out.println("[GTNH Rocket Anim] renderBuggy: renderAll() replaced with hookRenderModel");
+                    return;
+                }
+            }
+        }
+        System.out.println("[GTNH Rocket Anim] renderBuggy: WARN — IModelCustom.renderAll() not found, model swap skipped");
+    }
 
     private static final String RESOURCE_LOCATION_DESC = "Lnet/minecraft/util/ResourceLocation;";
 
