@@ -9,88 +9,206 @@ import org.objectweb.asm.tree.*;
 /**
  * ASM transformer for GTNH Galacticraft fork.
  *
- * Patches:
- *  1) EntityCargoRocket.moveToDestination(int) to actually respect its height parameter
- *     and route 800 -> configurable landingSpawnHeight.
- *  2) Injects a post-tick hook into EntityCargoRocket.func_70071_h_() so we can apply
- *     landing/takeoff easing without rewriting the mod's whole rocket logic.
- *  3) Injects a guard at the START of onReachAtmosphere() to delay teleport until
- *     takeoff animation completes.
+ * Patches EntityCargoRocket:
+ *  1) moveToDestination(int)    — intercepts teleport for landing height
+ *  2) func_70071_h_() / onUpdate() — injects per-tick animation hook
+ *  3) onReachAtmosphere()       — delays teleport until takeoff altitude reached
+ *  4) getFuelTankCapacity()     — returns tier-appropriate fuel capacity
+ *  5) <init>(World,D,D,D,EnumRocketType) — resizes FluidTank after rocketType set
+ *  6) readEntityFromNBT(NBTTagCompound)  — caches tier, resizes tank after load
+ *  7) writeEntityToNBT(NBTTagCompound)   — persists GTNHCargoTier NBT tag
+ *  8) getSizeInventory()        — returns tier-appropriate slot count
+ *
+ * Patches RenderCargoRocket:
+ *  9) renderBuggy(...)          — swaps static texture with tier-specific one
+ * 10) func_110779_a(...)        — same, for the entity-texture delegate
  */
 public class RocketAnimTransformer implements IClassTransformer {
 
+    // ---- EntityCargoRocket ----
     private static final String TARGET_CLASS_DOT =
             "micdoodle8.mods.galacticraft.planets.mars.entities.EntityCargoRocket";
     private static final String TARGET_CLASS =
             "micdoodle8/mods/galacticraft/planets/mars/entities/EntityCargoRocket";
 
-    // Superclass where some fields live (landing, targetVec, launchPhase, timeSinceLaunch)
-    private static final String AUTO_ROCKET_CLASS =
+    // ---- RenderCargoRocket ----
+    private static final String RENDER_CLASS_DOT =
+            "micdoodle8.mods.galacticraft.planets.mars.client.render.entity.RenderCargoRocket";
+    private static final String RENDER_CLASS =
+            "micdoodle8/mods/galacticraft/planets/mars/client/render/entity/RenderCargoRocket";
+
+    // Superclass where landing/targetVec/launchPhase/timeSinceLaunch live
+    private static final String AUTO_ROCKET =
             "micdoodle8/mods/galacticraft/api/prefab/entity/EntityAutoRocket";
 
-    private static final String BLOCKVEC3 = "micdoodle8/mods/galacticraft/api/vector/BlockVec3";
+    private static final String BLOCKVEC3 =
+            "micdoodle8/mods/galacticraft/api/vector/BlockVec3";
 
-    private boolean patchedMoveToDestination = false;
-    private boolean patchedTick = false;
-    private boolean patchedOnReachAtmosphere = false;
+    // EnumRocketType (used in 5-arg constructor descriptor)
+    private static final String ENUM_ROCKET_TYPE =
+            "micdoodle8/mods/galacticraft/api/entity/IRocketType$EnumRocketType";
+
+    // ---- State flags ----
+    private boolean patchedMoveToDestination   = false;
+    private boolean patchedTick                = false;
+    private boolean patchedOnReachAtmosphere   = false;
+    private boolean patchedFuelTankCapacity    = false;
+    private boolean patchedConstructor         = false;
+    private boolean patchedReadNbt             = false;
+    private boolean patchedWriteNbt            = false;
+    private boolean patchedSizeInventory       = false;
+    private boolean patchedRenderBuggy         = false;
+    private boolean patchedGetEntityTexture    = false;
+
+    // ---- Hooks class (internal ASM name) ----
+    private static final String HOOKS =
+            "com/yourname/gtnhrocketanim/RocketAnimHooks";
 
     @Override
     public byte[] transform(String name, String transformedName, byte[] basicClass) {
         if (basicClass == null) return null;
-        if (!TARGET_CLASS_DOT.equals(name)) return basicClass;
 
-        System.out.println("[GTNH Rocket Anim] Transforming " + name);
+        if (TARGET_CLASS_DOT.equals(name)) {
+            return transformEntityCargoRocket(basicClass);
+        }
+        if (RENDER_CLASS_DOT.equals(name)) {
+            return transformRenderCargoRocket(basicClass);
+        }
+        return basicClass;
+    }
+
+    // ==========================================================================
+    //  EntityCargoRocket transform
+    // ==========================================================================
+
+    private byte[] transformEntityCargoRocket(byte[] basicClass) {
+        System.out.println("[GTNH Rocket Anim] Transforming EntityCargoRocket");
 
         ClassNode cn = new ClassNode();
         new ClassReader(basicClass).accept(cn, 0);
 
-        // Debug: print all method names to see what we're working with
-        System.out.println("[GTNH Rocket Anim] Methods in class:");
+        System.out.println("[GTNH Rocket Anim] Methods found:");
         for (MethodNode mn : cn.methods) {
-            if (mn.name.contains("tick") || mn.name.contains("update") || mn.name.contains("70071") || 
-                mn.name.contains("Destination") || mn.name.equals("func_70071_h_") || mn.name.equals("onUpdate") ||
-                mn.name.contains("Atmosphere") || mn.name.contains("onReach")) {
-                System.out.println("[GTNH Rocket Anim]   - " + mn.name + mn.desc);
-            }
+            System.out.println("[GTNH Rocket Anim]   " + mn.name + mn.desc);
         }
 
         for (MethodNode mn : cn.methods) {
+
+            // (1) moveToDestination
             if ("moveToDestination".equals(mn.name) && "(I)V".equals(mn.desc)) {
                 System.out.println("[GTNH Rocket Anim] Patching moveToDestination(I)V");
                 patchMoveToDestination(mn);
                 patchedMoveToDestination = true;
             }
 
-            // Check for both obfuscated and deobfuscated names
-            if ((mn.name.equals("func_70071_h_") || mn.name.equals("onUpdate")) && "()V".equals(mn.desc)) {
+            // (2) onUpdate / tick
+            if ((mn.name.equals("func_70071_h_") || mn.name.equals("onUpdate"))
+                    && "()V".equals(mn.desc)) {
                 System.out.println("[GTNH Rocket Anim] Patching " + mn.name + "()V (tick)");
                 injectTickHook(mn);
                 patchedTick = true;
             }
-            
-            // Patch onReachAtmosphere to delay teleport until takeoff animation complete
+
+            // (3) onReachAtmosphere
             if ("onReachAtmosphere".equals(mn.name) && "()V".equals(mn.desc)) {
                 System.out.println("[GTNH Rocket Anim] Patching onReachAtmosphere()V");
                 injectAtmosphereGuard(mn);
                 patchedOnReachAtmosphere = true;
             }
+
+            // (4) getFuelTankCapacity — full body replacement
+            if ("getFuelTankCapacity".equals(mn.name) && "()I".equals(mn.desc)) {
+                System.out.println("[GTNH Rocket Anim] Patching getFuelTankCapacity()I");
+                patchGetFuelTankCapacity(mn);
+                patchedFuelTankCapacity = true;
+            }
+
+            // (5) 5-arg constructor — inject after PUTFIELD rocketType
+            if ("<init>".equals(mn.name) && mn.desc.contains("EnumRocketType")) {
+                System.out.println("[GTNH Rocket Anim] Patching constructor " + mn.desc);
+                injectConstructorTierInit(mn);
+                patchedConstructor = true;
+            }
+
+            // (6) readEntityFromNBT — inject before final RETURN
+            if (("readEntityFromNBT".equals(mn.name) || "func_70037_a".equals(mn.name))
+                    && "(Lnet/minecraft/nbt/NBTTagCompound;)V".equals(mn.desc)) {
+                System.out.println("[GTNH Rocket Anim] Patching readEntityFromNBT");
+                injectNbtReadHook(mn);
+                patchedReadNbt = true;
+            }
+
+            // (7) writeEntityToNBT — inject before final RETURN
+            if (("writeEntityToNBT".equals(mn.name) || "func_70014_b".equals(mn.name))
+                    && "(Lnet/minecraft/nbt/NBTTagCompound;)V".equals(mn.desc)) {
+                System.out.println("[GTNH Rocket Anim] Patching writeEntityToNBT");
+                injectNbtWriteHook(mn);
+                patchedWriteNbt = true;
+            }
+
+            // (8) getSizeInventory — full body replacement
+            if ("getSizeInventory".equals(mn.name) && "()I".equals(mn.desc)) {
+                System.out.println("[GTNH Rocket Anim] Patching getSizeInventory()I");
+                patchGetSizeInventory(mn);
+                patchedSizeInventory = true;
+            }
         }
 
-        if (!patchedMoveToDestination) {
-            System.out.println("[GTNH Rocket Anim] WARNING: moveToDestination not found!");
-        }
-        if (!patchedTick) {
-            System.out.println("[GTNH Rocket Anim] WARNING: func_70071_h_ not found!");
-        }
-        if (!patchedOnReachAtmosphere) {
-            System.out.println("[GTNH Rocket Anim] WARNING: onReachAtmosphere not found!");
-        }
+        logMissing("moveToDestination", patchedMoveToDestination);
+        logMissing("tick (func_70071_h_)", patchedTick);
+        logMissing("onReachAtmosphere", patchedOnReachAtmosphere);
+        logMissing("getFuelTankCapacity", patchedFuelTankCapacity);
+        logMissing("constructor (EnumRocketType)", patchedConstructor);
+        logMissing("readEntityFromNBT", patchedReadNbt);
+        logMissing("writeEntityToNBT", patchedWriteNbt);
+        logMissing("getSizeInventory", patchedSizeInventory);
 
         ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_MAXS | ClassWriter.COMPUTE_FRAMES);
         cn.accept(cw);
         return cw.toByteArray();
     }
 
+    // ==========================================================================
+    //  RenderCargoRocket transform
+    // ==========================================================================
+
+    private byte[] transformRenderCargoRocket(byte[] basicClass) {
+        System.out.println("[GTNH Rocket Anim] Transforming RenderCargoRocket");
+
+        ClassNode cn = new ClassNode();
+        new ClassReader(basicClass).accept(cn, 0);
+
+        for (MethodNode mn : cn.methods) {
+            // renderBuggy — the main render method
+            if ("renderBuggy".equals(mn.name)) {
+                System.out.println("[GTNH Rocket Anim] Patching RenderCargoRocket.renderBuggy" + mn.desc);
+                patchRenderTexture(mn, 1 /* entity is ALOAD_1 */);
+                patchedRenderBuggy = true;
+            }
+
+            // func_110779_a / getEntityTexture — texture delegate
+            if ("func_110779_a".equals(mn.name) || "getEntityTexture".equals(mn.name)) {
+                if (mn.desc.contains("ResourceLocation")) {
+                    System.out.println("[GTNH Rocket Anim] Patching RenderCargoRocket." + mn.name + mn.desc);
+                    patchGetEntityTexture(mn);
+                    patchedGetEntityTexture = true;
+                }
+            }
+        }
+
+        logMissing("RenderCargoRocket.renderBuggy", patchedRenderBuggy);
+        logMissing("RenderCargoRocket.func_110779_a / getEntityTexture", patchedGetEntityTexture);
+
+        ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_MAXS | ClassWriter.COMPUTE_FRAMES);
+        cn.accept(cw);
+        return cw.toByteArray();
+    }
+
+    // ==========================================================================
+    //  EntityCargoRocket patch implementations
+    // ==========================================================================
+
+    /** (1) Replace moveToDestination body completely. */
     private void patchMoveToDestination(MethodNode mn) {
         mn.instructions.clear();
         mn.tryCatchBlocks.clear();
@@ -98,77 +216,50 @@ public class RocketAnimTransformer implements IClassTransformer {
 
         InsnList insn = new InsnList();
 
-        // *** CALL INTERCEPT HOOK FIRST ***
-        // int result = RocketAnimHooks.interceptMoveToDestination(this, this.targetVec, this.destinationFrequency, arg1);
-        insn.add(new VarInsnNode(Opcodes.ALOAD, 0)); // this (as Entity)
-        
-        // this.targetVec
+        // int result = RocketAnimHooks.interceptMoveToDestination(this, this.targetVec,
+        //                                                          this.destinationFrequency, arg1);
         insn.add(new VarInsnNode(Opcodes.ALOAD, 0));
-        insn.add(new FieldInsnNode(Opcodes.GETFIELD, AUTO_ROCKET_CLASS, "targetVec", "L" + BLOCKVEC3 + ";"));
-        
-        // this.destinationFrequency
-        insn.add(new VarInsnNode(Opcodes.ALOAD, 0));
-        insn.add(new FieldInsnNode(Opcodes.GETFIELD, AUTO_ROCKET_CLASS, "destinationFrequency", "I"));
-        
-        // arg1 (original height parameter)
-        insn.add(new VarInsnNode(Opcodes.ILOAD, 1));
-        
-        insn.add(new MethodInsnNode(
-                Opcodes.INVOKESTATIC,
-                "com/yourname/gtnhrocketanim/RocketAnimHooks",
-                "interceptMoveToDestination",
-                "(Lnet/minecraft/entity/Entity;Ljava/lang/Object;II)I",
-                false
-        ));
-        
-        // Store result in a local variable (use slot 2 since slot 1 is the height arg)
-        insn.add(new VarInsnNode(Opcodes.ISTORE, 2));
-        
-        // if (result == -1) return; // Abort - takeoff animation will handle teleport later
-        insn.add(new VarInsnNode(Opcodes.ILOAD, 2));
-        insn.add(new InsnNode(Opcodes.ICONST_M1)); // -1
-        LabelNode continueLabel = new LabelNode();
-        insn.add(new JumpInsnNode(Opcodes.IF_ICMPNE, continueLabel)); // if result != -1, continue
-        insn.add(new InsnNode(Opcodes.RETURN)); // Abort!
-        insn.add(continueLabel);
-        
-        // *** If we get here, proceed with immediate teleport (fallback behavior) ***
-        // This code path is only used if the intercept hook returns the original height
-        
-        // Use result as the resolved height (stored in slot 2)
-        // int resolved = result;
 
-        // *** SET landing = true ***
+        insn.add(new VarInsnNode(Opcodes.ALOAD, 0));
+        insn.add(new FieldInsnNode(Opcodes.GETFIELD, AUTO_ROCKET, "targetVec", "L" + BLOCKVEC3 + ";"));
+
+        insn.add(new VarInsnNode(Opcodes.ALOAD, 0));
+        insn.add(new FieldInsnNode(Opcodes.GETFIELD, AUTO_ROCKET, "destinationFrequency", "I"));
+
+        insn.add(new VarInsnNode(Opcodes.ILOAD, 1));
+
+        insn.add(new MethodInsnNode(Opcodes.INVOKESTATIC, HOOKS,
+                "interceptMoveToDestination",
+                "(Lnet/minecraft/entity/Entity;Ljava/lang/Object;II)I", false));
+
+        insn.add(new VarInsnNode(Opcodes.ISTORE, 2)); // resolved height
+
+        // if (result == -1) return;
+        insn.add(new VarInsnNode(Opcodes.ILOAD, 2));
+        insn.add(new InsnNode(Opcodes.ICONST_M1));
+        LabelNode continueLabel = new LabelNode();
+        insn.add(new JumpInsnNode(Opcodes.IF_ICMPNE, continueLabel));
+        insn.add(new InsnNode(Opcodes.RETURN));
+        insn.add(continueLabel);
+
         // this.landing = true;
         insn.add(new VarInsnNode(Opcodes.ALOAD, 0));
         insn.add(new InsnNode(Opcodes.ICONST_1));
-        insn.add(new FieldInsnNode(Opcodes.PUTFIELD, AUTO_ROCKET_CLASS, "landing", "Z"));
+        insn.add(new FieldInsnNode(Opcodes.PUTFIELD, AUTO_ROCKET, "landing", "Z"));
 
-        // *** ZERO OUT MOTION ***
-        // In obfuscated runtime: motionX = field_70159_w, motionY = field_70181_x, motionZ = field_70179_y
-        // this.motionX = 0;
-        insn.add(new VarInsnNode(Opcodes.ALOAD, 0));
-        insn.add(new InsnNode(Opcodes.DCONST_0));
-        insn.add(new FieldInsnNode(Opcodes.PUTFIELD, "net/minecraft/entity/Entity", "field_70159_w", "D"));
-        
-        // this.motionY = 0;
-        insn.add(new VarInsnNode(Opcodes.ALOAD, 0));
-        insn.add(new InsnNode(Opcodes.DCONST_0));
-        insn.add(new FieldInsnNode(Opcodes.PUTFIELD, "net/minecraft/entity/Entity", "field_70181_x", "D"));
-        
-        // this.motionZ = 0;
-        insn.add(new VarInsnNode(Opcodes.ALOAD, 0));
-        insn.add(new InsnNode(Opcodes.DCONST_0));
-        insn.add(new FieldInsnNode(Opcodes.PUTFIELD, "net/minecraft/entity/Entity", "field_70179_y", "D"));
+        // Zero motion
+        for (String motionField : new String[]{ "field_70159_w", "field_70181_x", "field_70179_y" }) {
+            insn.add(new VarInsnNode(Opcodes.ALOAD, 0));
+            insn.add(new InsnNode(Opcodes.DCONST_0));
+            insn.add(new FieldInsnNode(Opcodes.PUTFIELD, "net/minecraft/entity/Entity", motionField, "D"));
+        }
 
-        // this.func_70107_b(targetVec.x + 0.5, targetVec.y + resolved + (destinationFrequency==1 ? 0 : 1), targetVec.z + 0.5)
-
-        // this (invokevirtual owner)
+        // this.setPosition(targetVec.x + 0.5, targetVec.y + resolved + freq_offset, targetVec.z + 0.5)
         insn.add(new VarInsnNode(Opcodes.ALOAD, 0));
 
-        // X = targetVec.x + 0.5 (targetVec is in EntityAutoRocket)
+        // X
         insn.add(new VarInsnNode(Opcodes.ALOAD, 0));
-        insn.add(new FieldInsnNode(Opcodes.GETFIELD, AUTO_ROCKET_CLASS, "targetVec", "L" + BLOCKVEC3 + ";"));
+        insn.add(new FieldInsnNode(Opcodes.GETFIELD, AUTO_ROCKET, "targetVec", "L" + BLOCKVEC3 + ";"));
         insn.add(new FieldInsnNode(Opcodes.GETFIELD, BLOCKVEC3, "x", "I"));
         insn.add(new InsnNode(Opcodes.I2D));
         insn.add(new LdcInsnNode(0.5D));
@@ -176,121 +267,260 @@ public class RocketAnimTransformer implements IClassTransformer {
 
         // Y = targetVec.y + resolved + (destinationFrequency == 1 ? 0 : 1)
         insn.add(new VarInsnNode(Opcodes.ALOAD, 0));
-        insn.add(new FieldInsnNode(Opcodes.GETFIELD, AUTO_ROCKET_CLASS, "targetVec", "L" + BLOCKVEC3 + ";"));
+        insn.add(new FieldInsnNode(Opcodes.GETFIELD, AUTO_ROCKET, "targetVec", "L" + BLOCKVEC3 + ";"));
         insn.add(new FieldInsnNode(Opcodes.GETFIELD, BLOCKVEC3, "y", "I"));
         insn.add(new InsnNode(Opcodes.I2D));
-
-        // + resolved (slot 2, the result from intercept)
         insn.add(new VarInsnNode(Opcodes.ILOAD, 2));
         insn.add(new InsnNode(Opcodes.I2D));
         insn.add(new InsnNode(Opcodes.DADD));
-
-        // + (destinationFrequency == 1 ? 0 : 1) - destinationFrequency is in EntityAutoRocket
         insn.add(new VarInsnNode(Opcodes.ALOAD, 0));
-        insn.add(new FieldInsnNode(Opcodes.GETFIELD, AUTO_ROCKET_CLASS, "destinationFrequency", "I"));
+        insn.add(new FieldInsnNode(Opcodes.GETFIELD, AUTO_ROCKET, "destinationFrequency", "I"));
         insn.add(new InsnNode(Opcodes.ICONST_1));
-        LabelNode eq = new LabelNode();
-        LabelNode end = new LabelNode();
-        insn.add(new JumpInsnNode(Opcodes.IF_ICMPEQ, eq));
+        LabelNode eqLabel  = new LabelNode();
+        LabelNode endLabel = new LabelNode();
+        insn.add(new JumpInsnNode(Opcodes.IF_ICMPEQ, eqLabel));
         insn.add(new InsnNode(Opcodes.DCONST_1));
-        insn.add(new JumpInsnNode(Opcodes.GOTO, end));
-        insn.add(eq);
+        insn.add(new JumpInsnNode(Opcodes.GOTO, endLabel));
+        insn.add(eqLabel);
         insn.add(new InsnNode(Opcodes.DCONST_0));
-        insn.add(end);
+        insn.add(endLabel);
         insn.add(new InsnNode(Opcodes.DADD));
 
-        // Z = targetVec.z + 0.5
+        // Z
         insn.add(new VarInsnNode(Opcodes.ALOAD, 0));
-        insn.add(new FieldInsnNode(Opcodes.GETFIELD, AUTO_ROCKET_CLASS, "targetVec", "L" + BLOCKVEC3 + ";"));
+        insn.add(new FieldInsnNode(Opcodes.GETFIELD, AUTO_ROCKET, "targetVec", "L" + BLOCKVEC3 + ";"));
         insn.add(new FieldInsnNode(Opcodes.GETFIELD, BLOCKVEC3, "z", "I"));
         insn.add(new InsnNode(Opcodes.I2D));
         insn.add(new LdcInsnNode(0.5D));
         insn.add(new InsnNode(Opcodes.DADD));
 
-        // call setPosition (func_70107_b is Entity's setPosition)
-        insn.add(new MethodInsnNode(
-                Opcodes.INVOKEVIRTUAL,
-                TARGET_CLASS,
-                "func_70107_b",
-                "(DDD)V",
-                false
-        ));
+        insn.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, TARGET_CLASS,
+                "func_70107_b", "(DDD)V", false));
 
         insn.add(new InsnNode(Opcodes.RETURN));
 
         mn.instructions.add(insn);
-        mn.maxStack = 0;
+        mn.maxStack  = 0;
         mn.maxLocals = 0;
-        
-        System.out.println("[GTNH Rocket Anim] Successfully patched moveToDestination (intercepts for takeoff animation)");
+        System.out.println("[GTNH Rocket Anim] moveToDestination patched");
     }
 
+    /** (2) Inject tick hook before the final RETURN. */
     private void injectTickHook(MethodNode mn) {
-        AbstractInsnNode ret = null;
-        for (AbstractInsnNode n = mn.instructions.getLast(); n != null; n = n.getPrevious()) {
-            if (n.getOpcode() == Opcodes.RETURN) { ret = n; break; }
-        }
+        AbstractInsnNode ret = findLastReturn(mn);
         if (ret == null) {
-            System.out.println("[GTNH Rocket Anim] WARNING: No RETURN instruction found in tick method!");
+            System.out.println("[GTNH Rocket Anim] WARN: no RETURN in tick method");
             return;
         }
 
         InsnList call = new InsnList();
-
-        // RocketAnimHooks.onCargoRocketTick((Entity)this, this.landing, this.targetVec, this.launchPhase, this.timeSinceLaunch);
-
-        call.add(new VarInsnNode(Opcodes.ALOAD, 0)); // this as Entity
-
-        // Use TARGET_CLASS (EntityCargoRocket) as the owner - JVM will resolve to parent field
+        call.add(new VarInsnNode(Opcodes.ALOAD, 0));
         call.add(new VarInsnNode(Opcodes.ALOAD, 0));
         call.add(new FieldInsnNode(Opcodes.GETFIELD, TARGET_CLASS, "landing", "Z"));
-
         call.add(new VarInsnNode(Opcodes.ALOAD, 0));
         call.add(new FieldInsnNode(Opcodes.GETFIELD, TARGET_CLASS, "targetVec", "L" + BLOCKVEC3 + ";"));
-
         call.add(new VarInsnNode(Opcodes.ALOAD, 0));
         call.add(new FieldInsnNode(Opcodes.GETFIELD, TARGET_CLASS, "launchPhase", "I"));
-
         call.add(new VarInsnNode(Opcodes.ALOAD, 0));
         call.add(new FieldInsnNode(Opcodes.GETFIELD, TARGET_CLASS, "timeSinceLaunch", "F"));
-
-        call.add(new MethodInsnNode(
-                Opcodes.INVOKESTATIC,
-                "com/yourname/gtnhrocketanim/RocketAnimHooks",
+        call.add(new MethodInsnNode(Opcodes.INVOKESTATIC, HOOKS,
                 "onCargoRocketTick",
-                "(Lnet/minecraft/entity/Entity;ZLjava/lang/Object;IF)V",
-                false
-        ));
+                "(Lnet/minecraft/entity/Entity;ZLjava/lang/Object;IF)V", false));
 
         mn.instructions.insertBefore(ret, call);
-        System.out.println("[GTNH Rocket Anim] Successfully injected tick hook");
+        System.out.println("[GTNH Rocket Anim] tick hook injected");
     }
-    
-    /**
-     * Injects a guard at the START of onReachAtmosphere() that calls our hook.
-     * If the hook returns true (delay requested), we return early from the method.
-     * This prevents the teleport until the takeoff animation completes.
-     */
+
+    /** (3) Inject atmosphere guard at method start. */
     private void injectAtmosphereGuard(MethodNode mn) {
         InsnList guard = new InsnList();
-        
-        // if (RocketAnimHooks.shouldDelayAtmosphereTransition(this)) return;
-        guard.add(new VarInsnNode(Opcodes.ALOAD, 0)); // this
-        guard.add(new MethodInsnNode(
-                Opcodes.INVOKESTATIC,
-                "com/yourname/gtnhrocketanim/RocketAnimHooks",
+        guard.add(new VarInsnNode(Opcodes.ALOAD, 0));
+        guard.add(new MethodInsnNode(Opcodes.INVOKESTATIC, HOOKS,
                 "shouldDelayAtmosphereTransition",
-                "(Lnet/minecraft/entity/Entity;)Z",
-                false
-        ));
-        
+                "(Lnet/minecraft/entity/Entity;)Z", false));
         LabelNode continueLabel = new LabelNode();
-        guard.add(new JumpInsnNode(Opcodes.IFEQ, continueLabel)); // if false, continue
-        guard.add(new InsnNode(Opcodes.RETURN)); // if true, return early
+        guard.add(new JumpInsnNode(Opcodes.IFEQ, continueLabel));
+        guard.add(new InsnNode(Opcodes.RETURN));
         guard.add(continueLabel);
-        
-        // Insert at the very beginning of the method
         mn.instructions.insert(guard);
-        System.out.println("[GTNH Rocket Anim] Successfully injected atmosphere guard");
+        System.out.println("[GTNH Rocket Anim] atmosphere guard injected");
+    }
+
+    /** (4) Replace getFuelTankCapacity() body: call hookGetFuelTankCapacity(this). */
+    private void patchGetFuelTankCapacity(MethodNode mn) {
+        mn.instructions.clear();
+        mn.tryCatchBlocks.clear();
+        mn.localVariables.clear();
+
+        InsnList insn = new InsnList();
+        insn.add(new VarInsnNode(Opcodes.ALOAD, 0));
+        insn.add(new MethodInsnNode(Opcodes.INVOKESTATIC, HOOKS,
+                "hookGetFuelTankCapacity",
+                "(Ljava/lang/Object;)I", false));
+        insn.add(new InsnNode(Opcodes.IRETURN));
+
+        mn.instructions.add(insn);
+        mn.maxStack  = 0;
+        mn.maxLocals = 0;
+        System.out.println("[GTNH Rocket Anim] getFuelTankCapacity patched");
+    }
+
+    /**
+     * (5) In the 5-arg constructor, inject hookPostConstructorTierInit(this)
+     * immediately after the first PUTFIELD whose field name is "rocketType".
+     */
+    private void injectConstructorTierInit(MethodNode mn) {
+        boolean injected = false;
+        for (AbstractInsnNode node : mn.instructions.toArray()) {
+            if (node.getOpcode() == Opcodes.PUTFIELD) {
+                FieldInsnNode fin = (FieldInsnNode) node;
+                if ("rocketType".equals(fin.name)) {
+                    InsnList call = new InsnList();
+                    call.add(new VarInsnNode(Opcodes.ALOAD, 0));
+                    call.add(new MethodInsnNode(Opcodes.INVOKESTATIC, HOOKS,
+                            "hookPostConstructorTierInit",
+                            "(Ljava/lang/Object;)V", false));
+                    mn.instructions.insert(node, call);
+                    injected = true;
+                    break; // only the first occurrence
+                }
+            }
+        }
+        if (injected) {
+            System.out.println("[GTNH Rocket Anim] constructor tier-init injected after PUTFIELD rocketType");
+        } else {
+            System.out.println("[GTNH Rocket Anim] WARN: PUTFIELD rocketType not found in constructor");
+        }
+    }
+
+    /**
+     * (6) Inject hookReadNbt(this, nbt) before the final RETURN of readEntityFromNBT.
+     * The NBTTagCompound parameter is at slot 1.
+     */
+    private void injectNbtReadHook(MethodNode mn) {
+        AbstractInsnNode ret = findLastReturn(mn);
+        if (ret == null) {
+            System.out.println("[GTNH Rocket Anim] WARN: no RETURN in readEntityFromNBT");
+            return;
+        }
+
+        InsnList call = new InsnList();
+        call.add(new VarInsnNode(Opcodes.ALOAD, 0)); // entity
+        call.add(new VarInsnNode(Opcodes.ALOAD, 1)); // NBTTagCompound
+        call.add(new MethodInsnNode(Opcodes.INVOKESTATIC, HOOKS,
+                "hookReadNbt",
+                "(Lnet/minecraft/entity/Entity;Lnet/minecraft/nbt/NBTTagCompound;)V", false));
+
+        mn.instructions.insertBefore(ret, call);
+        System.out.println("[GTNH Rocket Anim] readEntityFromNBT hook injected");
+    }
+
+    /**
+     * (7) Inject hookWriteNbt(this, nbt) before the final RETURN of writeEntityToNBT.
+     */
+    private void injectNbtWriteHook(MethodNode mn) {
+        AbstractInsnNode ret = findLastReturn(mn);
+        if (ret == null) {
+            System.out.println("[GTNH Rocket Anim] WARN: no RETURN in writeEntityToNBT");
+            return;
+        }
+
+        InsnList call = new InsnList();
+        call.add(new VarInsnNode(Opcodes.ALOAD, 0));
+        call.add(new VarInsnNode(Opcodes.ALOAD, 1));
+        call.add(new MethodInsnNode(Opcodes.INVOKESTATIC, HOOKS,
+                "hookWriteNbt",
+                "(Lnet/minecraft/entity/Entity;Lnet/minecraft/nbt/NBTTagCompound;)V", false));
+
+        mn.instructions.insertBefore(ret, call);
+        System.out.println("[GTNH Rocket Anim] writeEntityToNBT hook injected");
+    }
+
+    /** (8) Replace getSizeInventory() body: call hookGetSizeInventory(this). */
+    private void patchGetSizeInventory(MethodNode mn) {
+        mn.instructions.clear();
+        mn.tryCatchBlocks.clear();
+        mn.localVariables.clear();
+
+        InsnList insn = new InsnList();
+        insn.add(new VarInsnNode(Opcodes.ALOAD, 0));
+        insn.add(new MethodInsnNode(Opcodes.INVOKESTATIC, HOOKS,
+                "hookGetSizeInventory",
+                "(Ljava/lang/Object;)I", false));
+        insn.add(new InsnNode(Opcodes.IRETURN));
+
+        mn.instructions.add(insn);
+        mn.maxStack  = 0;
+        mn.maxLocals = 0;
+        System.out.println("[GTNH Rocket Anim] getSizeInventory patched");
+    }
+
+    // ==========================================================================
+    //  RenderCargoRocket patch implementations
+    // ==========================================================================
+
+    /**
+     * (9) In renderBuggy, replace every GETSTATIC of "cargoRocketTexture" with a call
+     * to hookGetCargoRocketTexture(entity), where entity is at the given slot.
+     */
+    private void patchRenderTexture(MethodNode mn, int entitySlot) {
+        int replaced = 0;
+        for (AbstractInsnNode node : mn.instructions.toArray()) {
+            if (node.getOpcode() == Opcodes.GETSTATIC) {
+                FieldInsnNode fin = (FieldInsnNode) node;
+                if ("cargoRocketTexture".equals(fin.name)) {
+                    InsnList replacement = new InsnList();
+                    replacement.add(new VarInsnNode(Opcodes.ALOAD, entitySlot));
+                    replacement.add(new MethodInsnNode(Opcodes.INVOKESTATIC, HOOKS,
+                            "hookGetCargoRocketTexture",
+                            "(Ljava/lang/Object;)Lnet/minecraft/util/ResourceLocation;", false));
+                    mn.instructions.insertBefore(node, replacement);
+                    mn.instructions.remove(node);
+                    replaced++;
+                }
+            }
+        }
+        System.out.println("[GTNH Rocket Anim] renderBuggy: replaced " + replaced + " cargoRocketTexture access(es)");
+    }
+
+    /**
+     * (10) Replace func_110779_a / getEntityTexture body:
+     * just call hookGetCargoRocketTexture(ALOAD_1) and ARETURN.
+     * The entity parameter is at slot 1 (slot 0 = this renderer).
+     */
+    private void patchGetEntityTexture(MethodNode mn) {
+        mn.instructions.clear();
+        mn.tryCatchBlocks.clear();
+        mn.localVariables.clear();
+
+        InsnList insn = new InsnList();
+        insn.add(new VarInsnNode(Opcodes.ALOAD, 1)); // entity arg
+        insn.add(new MethodInsnNode(Opcodes.INVOKESTATIC, HOOKS,
+                "hookGetCargoRocketTexture",
+                "(Ljava/lang/Object;)Lnet/minecraft/util/ResourceLocation;", false));
+        insn.add(new InsnNode(Opcodes.ARETURN));
+
+        mn.instructions.add(insn);
+        mn.maxStack  = 0;
+        mn.maxLocals = 0;
+        System.out.println("[GTNH Rocket Anim] func_110779_a / getEntityTexture patched");
+    }
+
+    // ==========================================================================
+    //  Helpers
+    // ==========================================================================
+
+    /** Find the last RETURN opcode in a method. */
+    private static AbstractInsnNode findLastReturn(MethodNode mn) {
+        for (AbstractInsnNode n = mn.instructions.getLast(); n != null; n = n.getPrevious()) {
+            if (n.getOpcode() == Opcodes.RETURN) return n;
+        }
+        return null;
+    }
+
+    private static void logMissing(String label, boolean patched) {
+        if (!patched) {
+            System.out.println("[GTNH Rocket Anim] WARNING: '" + label + "' not found — patch skipped.");
+        }
     }
 }
